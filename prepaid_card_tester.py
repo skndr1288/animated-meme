@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-أداة اختبار بطاقات البريبيد - النسخة المتقدمة
-Advanced Prepaid Card Testing Tool v2.0
+أداة اختبار بطاقات البريبيد - النسخة المتقدمة مع تكامل تليجرام
+Advanced Prepaid Card Testing Tool v3.0 with Telegram Integration
 """
 
 import re
 import json
 import csv
+import requests
 from datetime import datetime, timedelta
 from typing import Dict, Tuple, Optional, List
 from pathlib import Path
 import hashlib
 from enum import Enum
+import threading
+import time
 
 
 class CardStatus(Enum):
@@ -31,10 +34,140 @@ class TransactionType(Enum):
     DEPOSIT = "إيداع"
 
 
-class PrepaidCardTester:
-    """فئة متقدمة لاختبار بطاقات البريبيد"""
+class TelegramBot:
+    """فئة للتعامل مع تليجرام"""
     
-    # بطاقات اختبار وهمية موسعة
+    def __init__(self, token: str, chat_id: str):
+        """
+        تهيئة بوت التليجرام
+        
+        Args:
+            token: توكن البوت من BotFather
+            chat_id: معرّف الدردشة
+        """
+        self.token = token
+        self.chat_id = chat_id
+        self.api_url = f"https://api.telegram.org/bot{token}"
+        self.is_connected = False
+        self.test_connection()
+    
+    def test_connection(self) -> bool:
+        """اختبار الاتصال بتليجرام"""
+        try:
+            response = requests.get(
+                f"{self.api_url}/getMe",
+                timeout=5
+            )
+            if response.status_code == 200:
+                bot_info = response.json()
+                if bot_info.get('ok'):
+                    self.is_connected = True
+                    print(f"✅ متصل بتليجرام: @{bot_info['result'].get('username')}")
+                    return True
+        except Exception as e:
+            print(f"❌ خطأ في الاتصال بتليجرام: {e}")
+        
+        self.is_connected = False
+        return False
+    
+    def send_message(self, text: str, parse_mode: str = 'HTML') -> bool:
+        """
+        إرسال رسالة إلى التليجرام
+        
+        Args:
+            text: نص الرسالة
+            parse_mode: نمط التنسيق (HTML/Markdown)
+            
+        Returns:
+            نجاح الإرسال
+        """
+        if not self.is_connected:
+            return False
+        
+        try:
+            response = requests.post(
+                f"{self.api_url}/sendMessage",
+                json={
+                    'chat_id': self.chat_id,
+                    'text': text,
+                    'parse_mode': parse_mode
+                },
+                timeout=10
+            )
+            return response.status_code == 200
+        except Exception as e:
+            print(f"❌ خطأ في الإرسال: {e}")
+            return False
+    
+    def send_document(self, file_path: str, caption: str = '') -> bool:
+        """
+        إرسال ملف إلى التليجرام
+        
+        Args:
+            file_path: مسار الملف
+            caption: عنوان الملف
+            
+        Returns:
+            نجاح الإرسال
+        """
+        if not self.is_connected:
+            return False
+        
+        try:
+            with open(file_path, 'rb') as f:
+                response = requests.post(
+                    f"{self.api_url}/sendDocument",
+                    data={
+                        'chat_id': self.chat_id,
+                        'caption': caption
+                    },
+                    files={'document': f},
+                    timeout=30
+                )
+            return response.status_code == 200
+        except Exception as e:
+            print(f"❌ خطأ في إرسال الملف: {e}")
+            return False
+    
+    def send_card_alert(self, card_info: Dict, status: str):
+        """إرسال تنبيه اختبار البطاقة"""
+        message = f"""
+<b>🔔 تنبيه اختبار بطاقة</b>
+
+<b>النوع:</b> {card_info.get('card_type')}
+<b>آخر 4 أرقام:</b> {card_info.get('card_number')}
+<b>الحامل:</b> {card_info.get('holder')}
+<b>المبلغ:</b> ${card_info.get('amount', 0):.2f}
+
+<b>الحالة:</b> {status}
+<b>التقييم:</b> {card_info.get('overall_rating', 0):.1f}/10
+
+<i>الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i>
+"""
+        self.send_message(message)
+    
+    def send_statistics(self, stats: Dict):
+        """إرسال الإحصائيات"""
+        message = f"""
+<b>📊 إحصائيات الاختبارات</b>
+
+<b>إجمالي الاختبارات:</b> {stats.get('إجمالي_الاختبارات')}
+<b>البطاقات الصحيحة:</b> {stats.get('البطاقات_الصحيحة')}
+<b>معدل النجاح:</b> {stats.get('معدل_النجاح')}
+<b>متوسط التقييم:</b> {stats.get('متوسط_التقييم')}
+
+<b>إجمالي المعاملات:</b> {stats.get('إجمالي_المعاملات')}
+<b>المعاملات الناجحة:</b> {stats.get('المعاملات_الناجحة')}
+<b>إجمالي المبلغ:</b> {stats.get('إجمالي_المبلغ')}
+
+<i>الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i>
+"""
+        self.send_message(message)
+
+
+class PrepaidCardTester:
+    """فئة متقدمة لاختبار بطاقات البريبيد مع تكامل تليجرام"""
+    
     TEST_CARDS = {
         'visa': {
             'number': '4532015112830366',
@@ -74,13 +207,25 @@ class PrepaidCardTester:
         }
     }
     
-    def __init__(self, storage_file: str = 'card_test_results.json'):
-        """تهيئة الأداة مع نظام التخزين"""
+    def __init__(self, storage_file: str = 'card_test_results.json', 
+                 telegram_token: str = None, telegram_chat_id: str = None):
+        """تهيئة الأداة مع تكامل تليجرام"""
         self.results = []
         self.transactions = []
         self.storage_file = storage_file
         self.cards_database = {}
+        
+        # تكامل تليجرام
+        self.telegram = None
+        if telegram_token and telegram_chat_id:
+            self.telegram = TelegramBot(telegram_token, telegram_chat_id)
+        
         self.load_results()
+    
+    def log_to_telegram(self, message: str):
+        """تسجيل رسالة في تليجرام"""
+        if self.telegram and self.telegram.is_connected:
+            self.telegram.send_message(message)
     
     def save_results(self):
         """حفظ النتائج في ملف JSON"""
@@ -93,6 +238,9 @@ class PrepaidCardTester:
             with open(self.storage_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             print(f"✅ تم حفظ النتائج في {self.storage_file}")
+            
+            # إرسال تنبيه تليجرام
+            self.log_to_telegram(f"💾 تم حفظ النتائج - {len(self.results)} اختبار")
         except Exception as e:
             print(f"❌ خطأ في حفظ النتائج: {e}")
     
@@ -117,6 +265,13 @@ class PrepaidCardTester:
                     writer.writeheader()
                     writer.writerows(self.results)
                     print(f"✅ تم تصدير النتائج إلى {filename}")
+                    
+                    # إرسال الملف إلى تليجرام
+                    if self.telegram and self.telegram.is_connected:
+                        self.telegram.send_document(
+                            filename,
+                            f"📊 نتائج الاختبارات - {len(self.results)} بطاقة"
+                        )
         except Exception as e:
             print(f"❌ خطأ في التصدير: {e}")
     
@@ -303,6 +458,11 @@ class PrepaidCardTester:
         result['overall_rating'] = self.calculate_rating(result)
         
         self.results.append(result)
+        
+        # إرسال تنبيه تليجرام
+        if self.telegram and self.telegram.is_connected:
+            self.telegram.send_card_alert(result, result['status'])
+        
         return result
     
     def calculate_rating(self, result: Dict) -> float:
@@ -336,6 +496,13 @@ class PrepaidCardTester:
         transaction['status'] = '✅ تمت بنجاح' if is_valid else '❌ فشلت'
         
         self.transactions.append(transaction)
+        
+        # إرسال تنبيه تليجرام
+        if self.telegram and self.telegram.is_connected:
+            self.log_to_telegram(
+                f"💰 معاملة {trans_type.value}: ${amount:.2f} - {transaction['status']}"
+            )
+        
         return transaction
     
     def get_statistics(self) -> Dict:
@@ -401,16 +568,59 @@ class PrepaidCardTester:
         for key, value in stats.items():
             print(f"{key}: {value}")
         print("="*60 + "\n")
+        
+        # إرسال الإحصائيات إلى تليجرام
+        if self.telegram and self.telegram.is_connected:
+            self.telegram.send_statistics(stats)
+
+
+def get_telegram_credentials():
+    """الحصول على بيانات تليجرام من المستخدم"""
+    print("\n" + "="*60)
+    print("🤖 إعدادات التكامل مع تليجرام")
+    print("="*60)
+    print("\nهل تريد تفعيل تكامل تليجرام؟")
+    print("1. نعم")
+    print("2. لا")
+    
+    choice = input("اختر (1/2): ").strip()
+    
+    if choice == '1':
+        print("\n📋 تعليمات الحصول على بيانات تليجرام:")
+        print("1. اذهب إلى @BotFather على تليجرام")
+        print("2. أرسل: /newbot")
+        print("3. اتبع التعليمات واحصل على التوكن")
+        print("4. اذهب إلى @userinfobot واحصل على Chat ID")
+        
+        token = input("\nأدخل توكن البوت: ").strip()
+        chat_id = input("أدخل Chat ID: ").strip()
+        
+        if token and chat_id:
+            return token, chat_id
+    
+    return None, None
 
 
 def main():
     """الدالة الرئيسية مع واجهة تفاعلية محسنة"""
-    tester = PrepaidCardTester()
     
     print("\n" + "🎯 "*15)
-    print("أداة اختبار بطاقات البريبيد - النسخة المتقدمة v2.0")
-    print("Advanced Prepaid Card Testing Tool v2.0")
+    print("أداة اختبار بطاقات البريبيد - النسخة المتقدمة v3.0")
+    print("مع تكامل تليجرام الكامل")
+    print("Advanced Prepaid Card Testing Tool v3.0 with Telegram")
     print("🎯 "*15)
+    
+    # الحصول على بيانات تليجرام
+    telegram_token, telegram_chat_id = get_telegram_credentials()
+    
+    # إنشاء الأداة
+    tester = PrepaidCardTester(
+        telegram_token=telegram_token,
+        telegram_chat_id=telegram_chat_id
+    )
+    
+    if telegram_token and telegram_chat_id:
+        tester.log_to_telegram("🚀 تم بدء أداة اختبار البطاقات")
     
     while True:
         print("\n" + "-"*60)
@@ -433,6 +643,8 @@ def main():
         
         elif choice == '2':
             print("\n🧪 اختبار بطاقات العينات...")
+            tester.log_to_telegram("🧪 بدء اختبار بطاقات العينات...")
+            
             for card_type, card_data in tester.TEST_CARDS.items():
                 result = tester.test_card(
                     card_number=card_data['number'],
@@ -460,8 +672,10 @@ def main():
             
             except ValueError:
                 print("❌ إدخال غير صحيح")
+                tester.log_to_telegram("❌ خطأ: إدخال غير صحيح في الاختبار اليدوي")
             except Exception as e:
                 print(f"❌ خطأ: {e}")
+                tester.log_to_telegram(f"❌ خطأ: {e}")
         
         elif choice == '4':
             print("\n💰 محاكاة معاملة مالية")
@@ -481,6 +695,7 @@ def main():
             
             except Exception as e:
                 print(f"❌ خطأ: {e}")
+                tester.log_to_telegram(f"❌ خطأ في المعاملة: {e}")
         
         elif choice == '5':
             tester.display_statistics()
@@ -493,6 +708,8 @@ def main():
         
         elif choice == '8':
             print("\n👋 شكراً لاستخدام الأداة!")
+            if tester.telegram and tester.telegram.is_connected:
+                tester.log_to_telegram("👋 تم إيقاف أداة الاختبار")
             break
         
         else:
